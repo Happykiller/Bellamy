@@ -1,0 +1,9 @@
+# Trading bot core
+ccxt>=4.3.0
+
+# Env handling
+python-dotenv>=1.0.1
+
+# Data/indicators
+pandas>=2.2.2
+numpy>=2.0.0

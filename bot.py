@@ -3,10 +3,14 @@ import os
 import sys
 import json
 import time
+import ccxt  # pip install ccxt
+import numpy as np
+import pandas as pd
 from decimal import Decimal
 from dotenv import load_dotenv
+from decimal import Decimal, ROUND_HALF_UP
 
-import ccxt  # pip install ccxt
+NBSP = "\u00A0"
 
 load_dotenv()
 
@@ -14,6 +18,102 @@ API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 SYMBOL = os.getenv("SYMBOL", "BTC/USDT")  # trading pair
 
+def _to_decimal(x) -> Decimal:
+    if isinstance(x, Decimal):
+        return x
+    try:
+        return Decimal(str(x))
+    except Exception:
+        return Decimal(0)
+
+def format_value(x, decimals=2, strip_trailing=True) -> str:
+    """
+    General French formatting: thousands with NBSP + ',' as decimal separator.
+    Example: 12345.5 (decimals=2) -> '12 345,50'
+    """
+    d = _to_decimal(x).quantize(Decimal(10) ** -decimals, rounding=ROUND_HALF_UP)
+    q = f"{d:,.{decimals}f}".replace(",", "X").replace(".", ",").replace("X", NBSP)
+    if strip_trailing and decimals > 0:
+        # Remove trailing zeros and trailing comma
+        q = q.rstrip("0").rstrip(",")
+    return q
+
+def fetch_ohlcv_df(exchange, symbol: str, timeframe: str = "1d", limit: int = 100) -> pd.DataFrame:
+    """
+    Fetch OHLCV data and return a tidy pandas DataFrame with:
+    time (ms), open, high, low, close, volume, and a datetime index.
+    """
+    raw = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+    if not raw or len(raw) == 0:
+        raise RuntimeError("No OHLCV data returned")
+
+    df = pd.DataFrame(raw, columns=["time", "open", "high", "low", "close", "volume"])
+    df["datetime"] = pd.to_datetime(df["time"], unit="ms", utc=True)
+    df.set_index("datetime", inplace=True)
+    return df[["open", "high", "low", "close", "volume", "time"]]
+
+
+def sma(series: pd.Series, window: int) -> pd.Series:
+    """Simple moving average."""
+    return series.rolling(window=window, min_periods=window).mean()
+
+
+def atr(df: pd.DataFrame, window: int = 14) -> pd.Series:
+    """
+    Average True Range (Wilder). Returns a pandas Series aligned with df index.
+
+    TR_t = max(
+        high_t - low_t,
+        |high_t - close_{t-1}|,
+        |low_t  - close_{t-1}|
+    )
+
+    ATR = SMA(TR, window)  (Wilder uses RMA, SMA is acceptable if you prefer it)
+    """
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        (high - low),
+        (high - prev_close).abs(),
+        (low - prev_close).abs()
+    ], axis=1).max(axis=1)
+
+    # Wilder's ATR uses an RMA (smoothed moving average). Here is SMA for simplicity:
+    atr_sma = tr.rolling(window=window, min_periods=window).mean()
+
+    # If you prefer Wilder's smoothing (RMA), uncomment below and comment SMA above:
+    # rma = tr.ewm(alpha=1/window, adjust=False).mean()
+    # return rma
+
+    return atr_sma
+
+
+def compute_indicators(exchange, symbol: str, timeframe: str = "1d") -> dict:
+    """
+    Compute MA20 and ATR14 on the requested timeframe.
+    Returns the last values (most recent candle) and the latest df for further use.
+    """
+    # Need at least 20 for MA20 and 14 for ATR, take margin (e.g., 120)
+    df = fetch_ohlcv_df(exchange, symbol, timeframe=timeframe, limit=120)
+
+    df["MA20"] = sma(df["close"], 20)
+    df["ATR14"] = atr(df, 14)
+
+    last_row = df.iloc[-1]
+    last_ma20 = float(last_row["MA20"]) if not np.isnan(last_row["MA20"]) else None
+    last_atr14 = float(last_row["ATR14"]) if not np.isnan(last_row["ATR14"]) else None
+    last_close = float(last_row["close"])
+
+    return {
+        "timeframe": timeframe,
+        "last_close": last_close,
+        "MA20": last_ma20,
+        "ATR14": last_atr14,
+        "df": df,  # keep it if you want to examine the whole history
+    }
 
 def mk_exchange():
   """
@@ -109,7 +209,7 @@ def print_balance(exchange):
     if total and total > 0:
       free = balance["free"][asset]
       used = balance["used"][asset]
-      print(f" - {asset}: total={total}, free={free}, used={used}")
+      print(f" - {asset}: total={format_value(total)}, free={format_value(free)}, used={format_value(used)}")
 
 def main():
     """CLI entry point for the trading bot."""
@@ -121,12 +221,37 @@ def main():
 
     if cmd == "price":
         last = fetch_ticker_last(exchange, SYMBOL)
-        print(f"📈 {SYMBOL} last = {last}")
+        print(f"📈 {SYMBOL} last = {format_value(last)}")
         return
       
     if cmd == "balance":
       print_balance(exchange)
       return
+    
+    if cmd == "indicators":
+        # Optional: pass timeframe as 3rd arg (default 1d)
+        timeframe = sys.argv[2] if len(sys.argv) >= 3 else "1d"
+        data = compute_indicators(exchange, SYMBOL, timeframe)
+        print("\n📊 Indicators")
+        print(json.dumps({
+            "symbol": SYMBOL,
+            "timeframe": data["timeframe"],
+            "last_close": format_value(data["last_close"]),
+            "MA20": format_value(data["MA20"]),
+            "ATR14": format_value(data["ATR14"])
+        }, indent=2, ensure_ascii=False))
+        # Example of dynamic trigger levels:
+        if data["MA20"] and data["ATR14"]:
+            buy_lvl = data["MA20"] - 2 * data["ATR14"]
+            tp_lvl  = data["last_close"] + 3 * data["ATR14"]
+            sl_lvl  = data["last_close"] - 1.5 * data["ATR14"]
+            print("\n🎯 Dynamic levels")
+            print(json.dumps({
+                "buy_level": format_value(buy_lvl),
+                "take_profit": format_value(tp_lvl),
+                "stop_loss": format_value(sl_lvl)
+            }, indent=2, ensure_ascii=False))
+        return
 
     if cmd in ("buy", "sell"):
         if len(sys.argv) < 3:
