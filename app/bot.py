@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import os
 import sys
 import json
 import time
@@ -7,16 +6,13 @@ import ccxt  # pip install ccxt
 import numpy as np
 import pandas as pd
 from decimal import Decimal
-from dotenv import load_dotenv
 from decimal import Decimal, ROUND_HALF_UP
+
+from app.config import EnvConfig, load_env_vars
 
 NBSP = "\u00A0"
 
-load_dotenv()
-
-API_KEY = os.getenv("BINANCE_API_KEY")
-API_SECRET = os.getenv("BINANCE_API_SECRET")
-SYMBOL = os.getenv("SYMBOL", "BTC/USDT")  # trading pair
+envs:EnvConfig = load_env_vars()
 
 def _to_decimal(x) -> Decimal:
     if isinstance(x, Decimal):
@@ -122,13 +118,13 @@ def mk_exchange():
   - Uses API key and secret from environment variables.
   - Enables sandbox mode (https://testnet.binance.vision).
   """
-  if not API_KEY or not API_SECRET:
+  if not envs.binance_api_key or not envs.binance_api_secret:
     print("❌ Missing BINANCE_API_KEY or BINANCE_API_SECRET in .env", file=sys.stderr)
     sys.exit(1)
 
   exchange = ccxt.binance({
-    "apiKey": API_KEY,
-    "secret": API_SECRET,
+    "apiKey": envs.binance_api_key,
+    "secret": envs.binance_api_secret,
     "enableRateLimit": True,
     "options": {"defaultType": "spot"},  # Spot market, not futures
   })
@@ -220,8 +216,8 @@ def main():
     exchange = mk_exchange()
 
     if cmd == "price":
-        last = fetch_ticker_last(exchange, SYMBOL)
-        print(f"📈 {SYMBOL} last = {format_value(last)}")
+        last = fetch_ticker_last(exchange, 'BTC/USDT')
+        print(f"📈 BTC/USDT last = {format_value(last)}")
         return
       
     if cmd == "balance":
@@ -231,10 +227,10 @@ def main():
     if cmd == "indicators":
         # Optional: pass timeframe as 3rd arg (default 1d)
         timeframe = sys.argv[2] if len(sys.argv) >= 3 else "1d"
-        data = compute_indicators(exchange, SYMBOL, timeframe)
+        data = compute_indicators(exchange, 'BTC/USDT', timeframe)
         print("\n📊 Indicators")
         print(json.dumps({
-            "symbol": SYMBOL,
+            "symbol": 'BTC/USDT',
             "timeframe": data["timeframe"],
             "last_close": format_value(data["last_close"]),
             "MA20": format_value(data["MA20"]),
@@ -264,19 +260,19 @@ def main():
 
         # Ensure the symbol exists on this exchange
         markets = exchange.load_markets()
-        if SYMBOL not in markets:
-            print(f"❌ Market {SYMBOL} not found on this exchange/testnet.", file=sys.stderr)
+        if 'BTC/USDT' not in markets:
+            print(f"❌ Market BTC/USDT not found on this exchange/testnet.", file=sys.stderr)
             sys.exit(1)
 
-        print(f"⏳ Placing {cmd.upper()} order {amount} {SYMBOL} (market) on testnet...")
-        order = place_market_order(exchange, SYMBOL, cmd, amount)
+        print(f"⏳ Placing {cmd.upper()} order {amount} BTC/USDT (market) on testnet...")
+        order = place_market_order(exchange, 'BTC/USDT', cmd, amount)
 
         # Wait a bit before fetching updated order status
         time.sleep(0.5)
         oid = order.get("id")
         if oid:
             try:
-                order = exchange.fetch_order(oid, SYMBOL)
+                order = exchange.fetch_order(oid, 'BTC/USDT')
             except Exception:
                 # Some testnet endpoints may not support fetch_order immediately
                 pass
